@@ -7,7 +7,10 @@ const {
     generateVerificationToken,
     verifyToken,
     sendVerificationEmail,
-    sendWelcomeEmail
+    sendWelcomeEmail,
+    generatePasswordResetToken,
+    sendPasswordResetEmail,
+    sendPasswordResetConfirmationEmail
 } = require('../utils/emailService');
 
 const router = express.Router();
@@ -484,6 +487,232 @@ router.post('/resend-verification', [
         res.status(500).json({
             success: false,
             message: 'Server error while resending verification email'
+        });
+    }
+});
+
+// @route   POST /api/auth/forgot-password
+// @desc    Request password reset email
+// @access  Public
+router.post('/forgot-password', [
+    body('email')
+        .isEmail()
+        .normalizeEmail()
+        .withMessage('Please enter a valid email')
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation failed',
+                errors: errors.array()
+            });
+        }
+
+        const { email } = req.body;
+
+        // Find user
+        const user = await User.findOne({ email });
+
+        // Always return success message for security (don't reveal if email exists)
+        if (!user) {
+            return res.json({
+                success: true,
+                message: 'If an account exists with this email, you will receive a password reset link shortly.'
+            });
+        }
+
+        // Check if user is active
+        if (!user.isActive) {
+            return res.json({
+                success: true,
+                message: 'If an account exists with this email, you will receive a password reset link shortly.'
+            });
+        }
+
+        // Generate password reset token
+        const resetToken = generatePasswordResetToken(user._id, email);
+
+        // Save token and expiry to database
+        user.passwordResetToken = resetToken;
+        user.passwordResetExpires = Date.now() + 3600000; // 1 hour from now
+        await user.save();
+
+        // Send password reset email
+        try {
+            await sendPasswordResetEmail(email, user.name, resetToken);
+
+            res.json({
+                success: true,
+                message: 'Password reset email sent successfully. Please check your inbox.'
+            });
+        } catch (emailError) {
+            console.error('Failed to send password reset email:', emailError);
+
+            // Clear the reset token if email fails
+            user.passwordResetToken = undefined;
+            user.passwordResetExpires = undefined;
+            await user.save();
+
+            res.status(500).json({
+                success: false,
+                message: 'Failed to send password reset email. Please try again later.'
+            });
+        }
+    } catch (error) {
+        console.error('Forgot password error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error while processing password reset request'
+        });
+    }
+});
+
+// @route   POST /api/auth/reset-password
+// @desc    Reset password with token
+// @access  Public
+router.post('/reset-password', [
+    body('token')
+        .notEmpty()
+        .withMessage('Reset token is required'),
+    body('newPassword')
+        .isLength({ min: 6 })
+        .withMessage('New password must be at least 6 characters long')
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation failed',
+                errors: errors.array()
+            });
+        }
+
+        const { token, newPassword } = req.body;
+
+        // Verify the token
+        let decoded;
+        try {
+            decoded = verifyToken(token);
+
+            // Check if it's a password reset token
+            if (decoded.type !== 'password-reset') {
+                throw new Error('Invalid token type');
+            }
+        } catch (error) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or expired reset token'
+            });
+        }
+
+        // Find user with the token and check expiry
+        const user = await User.findOne({
+            _id: decoded.userId,
+            email: decoded.email,
+            passwordResetToken: token,
+            passwordResetExpires: { $gt: Date.now() }
+        }).select('+password');
+
+        if (!user) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or expired reset token'
+            });
+        }
+
+        // Update password
+        user.password = newPassword;
+        user.passwordResetToken = undefined;
+        user.passwordResetExpires = undefined;
+        await user.save();
+
+        // Send confirmation email
+        try {
+            await sendPasswordResetConfirmationEmail(user.email, user.name);
+        } catch (emailError) {
+            console.error('Failed to send password reset confirmation email:', emailError);
+        }
+
+        res.json({
+            success: true,
+            message: 'Password reset successfully. You can now log in with your new password.'
+        });
+    } catch (error) {
+        console.error('Reset password error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error while resetting password'
+        });
+    }
+});
+
+// @route   POST /api/auth/verify-reset-token
+// @desc    Verify if password reset token is valid
+// @access  Public
+router.post('/verify-reset-token', [
+    body('token')
+        .notEmpty()
+        .withMessage('Reset token is required')
+], async (req, res) => {
+    try {
+        const errors = validationResult(req);
+        if (!errors.isEmpty()) {
+            return res.status(400).json({
+                success: false,
+                message: 'Validation failed',
+                errors: errors.array()
+            });
+        }
+
+        const { token } = req.body;
+
+        // Verify the token
+        let decoded;
+        try {
+            decoded = verifyToken(token);
+
+            if (decoded.type !== 'password-reset') {
+                throw new Error('Invalid token type');
+            }
+        } catch (error) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or expired reset token',
+                valid: false
+            });
+        }
+
+        // Check if user exists and token is still valid
+        const user = await User.findOne({
+            _id: decoded.userId,
+            email: decoded.email,
+            passwordResetToken: token,
+            passwordResetExpires: { $gt: Date.now() }
+        });
+
+        if (!user) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or expired reset token',
+                valid: false
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Token is valid',
+            valid: true,
+            email: user.email
+        });
+    } catch (error) {
+        console.error('Verify reset token error:', error);
+        res.status(500).json({
+            success: false,
+            message: 'Server error while verifying token',
+            valid: false
         });
     }
 });
