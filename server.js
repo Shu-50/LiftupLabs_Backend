@@ -10,6 +10,7 @@ const authRoutes = require('./routes/auth');
 const eventRoutes = require('./routes/events');
 const userRoutes = require('./routes/users');
 const contactRoutes = require('./routes/contact');
+const notesRoutes = require('./routes/notes');
 
 const app = express();
 app.set("trust proxy", 1);
@@ -32,8 +33,8 @@ app.use(cors({
 }));
 
 // Body parsing middleware
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
 // Static files
 app.use('/uploads', express.static('uploads'));
@@ -48,6 +49,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/events', eventRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/contact', contactRoutes);
+app.use('/api/notes', notesRoutes);
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
